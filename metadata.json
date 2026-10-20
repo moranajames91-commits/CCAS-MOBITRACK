@@ -1,0 +1,6 @@
+{
+  "name": "CCAS MOBITRACK",
+  "description": "CCAS MOBITRACK inventory management and POS client featuring an admin dashboard, cashier POS, checkout and receipt flow, stock tracking, and downloadable MySQL database schema.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

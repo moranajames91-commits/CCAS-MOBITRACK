@@ -23,6 +23,22 @@ const getSSTTimestamp = (date = new Date()) => {
   return `${values.year}-${values.month}-${values.day}T${values.hour}:${values.minute}:${values.second}+08:00`;
 };
 
+const normalizeProductName = (name: unknown) =>
+  typeof name === 'string'
+    ? name.normalize('NFKC').trim().replace(/\s+/gu, ' ').toLocaleLowerCase()
+    : '';
+
+const getUniqueProductsByName = (items: Product[]) => {
+  const seenNames = new Set<string>();
+  return items.filter(product => {
+    const normalizedName = normalizeProductName(product.name);
+    if (!normalizedName) return true;
+    if (seenNames.has(normalizedName)) return false;
+    seenNames.add(normalizedName);
+    return true;
+  });
+};
+
 const readOperatingExpenseResponse = async (response: Response, operation: string) => {
   const responseText = await response.text();
   let payload: unknown;
@@ -78,13 +94,15 @@ const getInitialApiUrl = () => {
 };
 
 export default function App() {
+  const addingProductRef = React.useRef(false);
   
   // 1. Initialize Products State from localStorage with seed fallback
   const [products, setProducts] = useState<Product[]>(() => {
     const saved = localStorage.getItem('cims_products');
     if (saved) {
       try {
-        return JSON.parse(saved);
+        const cachedProducts: unknown = JSON.parse(saved);
+        if (Array.isArray(cachedProducts)) return getUniqueProductsByName(cachedProducts as Product[]);
       } catch (e) {
         console.warn('Failed to parse cached products:', e);
       }
@@ -247,11 +265,15 @@ export default function App() {
             ? parseInt(String(p.warrantyDays ?? p.warranty_days), 10)
             : undefined
         }));
+        const uniqueProducts = getUniqueProductsByName(formattedProducts);
+        if (uniqueProducts.length !== formattedProducts.length) {
+          console.warn('Duplicate product names were excluded from the shared inventory and cashier catalog.');
+        }
         
         // The shared database is authoritative when API sync succeeds.
         // Do not merge stale local products back after another device deletes them.
-        setProducts(formattedProducts);
-        localStorage.setItem('cims_products', JSON.stringify(formattedProducts));
+        setProducts(uniqueProducts);
+        localStorage.setItem('cims_products', JSON.stringify(uniqueProducts));
       } else {
         throw new Error(pData.message || 'Error occurred querying products endpoint.');
       }
@@ -478,14 +500,24 @@ export default function App() {
 
   // ADD PRODUCT
   const handleAddProduct = async (newProd: Product) => {
-    // 1. Save locally
-    const updated = [newProd, ...products];
-    setProducts(updated);
-    localStorage.setItem('cims_products', JSON.stringify(updated));
+    if (addingProductRef.current) {
+      throw new Error('A product save is already in progress. Please wait.');
+    }
+    addingProductRef.current = true;
 
-    // 2. Synchronize up to the central XAMPP MySQL Database if online sync mode is active
-    if (useApi) {
-      try {
+    try {
+      const normalizedName = normalizeProductName(newProd.name);
+      const cachedProducts = localStorage.getItem('cims_products');
+      let latestLocalProducts: Product[] = products;
+      if (cachedProducts) {
+        try {
+          const parsedProducts: unknown = JSON.parse(cachedProducts);
+          if (Array.isArray(parsedProducts)) latestLocalProducts = parsedProducts as Product[];
+        } catch (error) {
+          console.warn('Could not check the cached inventory before adding a product:', error);
+        }
+      }
+      if (useApi) {
         const response = await fetch(`${apiUrl}?action=products`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -510,17 +542,34 @@ export default function App() {
         } catch {
           throw new Error(responseText.trim()
             ? `Product API returned HTTP ${response.status}: ${responseText.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 240)}`
-            : `Product save failed with HTTP ${response.status}. If the COGS database columns are missing, run cims\\migrate_cogs.sql in phpMyAdmin and deploy the updated cims\\api.php.`);
+            : `Product save failed with HTTP ${response.status}. If the COGS database columns are missing, run cims\\migrate_cogs.sql and deploy the updated cims\\api.php.`);
         }
         if (!response.ok || payload.status !== 'success') {
           throw new Error(payload.message || `Product save failed with HTTP ${response.status}.`);
         }
-        await fetchFromApi();
-      } catch (err) {
-        console.warn("XAMPP connection failed during product addition:", err);
-        await fetchFromApi();
-        alert(err instanceof Error ? err.message : 'Product could not be saved to the database.');
+
+        const savedProduct = {
+          ...newProd,
+          id: typeof payload.id === 'string' ? payload.id : newProd.id
+        };
+        const updated = getUniqueProductsByName([savedProduct, ...latestLocalProducts]);
+        setProducts(updated);
+        localStorage.setItem('cims_products', JSON.stringify(updated));
+        return;
       }
+
+      const duplicateInLocalProducts = latestLocalProducts.find(
+        product => normalizedName !== '' && normalizeProductName(product.name) === normalizedName
+      );
+      if (duplicateInLocalProducts) {
+        throw new Error(`Error: Duplicate product detected. '${newProd.name.trim()}' already exists.`);
+      }
+
+      const updated = [newProd, ...latestLocalProducts];
+      setProducts(updated);
+      localStorage.setItem('cims_products', JSON.stringify(updated));
+    } finally {
+      addingProductRef.current = false;
     }
   };
 
@@ -691,12 +740,16 @@ export default function App() {
 
   // Update / Alter parameters
   const handleUpdateProduct = async (updatedProd: Product) => {
-    // 1. Update offline memories
-    const updated = products.map(p => p.id === updatedProd.id ? updatedProd : p);
-    setProducts(updated);
-    localStorage.setItem('cims_products', JSON.stringify(updated));
+    const normalizedName = updatedProd.name.trim().toLocaleLowerCase();
+    const duplicate = products.find(
+      product => product.id !== updatedProd.id
+        && product.name.trim().toLocaleLowerCase() === normalizedName
+    );
+    if (duplicate) {
+      alert(`Error: Duplicate product detected. '${updatedProd.name.trim()}' already exists.`);
+      return;
+    }
 
-    // 2. Push update upstream to XAMPP API
     if (useApi) {
       try {
         const response = await fetch(`${apiUrl}?action=product_update`, {
@@ -730,12 +783,18 @@ export default function App() {
           throw new Error(payload.message || `Inventory save failed with HTTP ${response.status}.`);
         }
         await fetchFromApi();
+        return;
       } catch (err) {
         console.warn("XAMPP writeback failed during product updates:", err);
         await fetchFromApi();
         alert(err instanceof Error ? err.message : 'Inventory changes could not be saved to the database.');
+        return;
       }
     }
+
+    const updated = products.map(p => p.id === updatedProd.id ? updatedProd : p);
+    setProducts(updated);
+    localStorage.setItem('cims_products', JSON.stringify(updated));
   };
 
   // Delete / Remove discontinued item
@@ -1073,8 +1132,9 @@ export default function App() {
             localStorage.setItem('cims_operating_expenses', JSON.stringify(b.operatingExpenses));
           }
           if (missingProd && Array.isArray(b.products) && b.products.length > 0) {
-            setProducts(b.products);
-            localStorage.setItem('cims_products', JSON.stringify(b.products));
+            const uniqueProducts = getUniqueProductsByName(b.products);
+            setProducts(uniqueProducts);
+            localStorage.setItem('cims_products', JSON.stringify(uniqueProducts));
           }
           if (Array.isArray(b.cashiers) && b.cashiers.length > 0) {
             setCashiers(b.cashiers);
@@ -1116,7 +1176,7 @@ export default function App() {
   if (currentAuth.role === 'admin') {
     return (
       <AdminDashboard
-        products={products}
+        products={getUniqueProductsByName(products)}
         cashiers={cashiers}
         admins={admins}
         transactions={transactions}
@@ -1154,7 +1214,7 @@ export default function App() {
   // Fallback / standard route is Cashier POS terminal mode
   return (
     <CashierPOS
-      products={products}
+      products={getUniqueProductsByName(products)}
       currentAuth={currentAuth}
       onLogout={handleLogout}
       onAddTransaction={handleAddTransaction}

@@ -27,6 +27,16 @@ $inputData = json_decode(file_get_contents("php://input"), true);
 $method = $_SERVER['REQUEST_METHOD'];
 $action = isset($_GET['action']) ? $_GET['action'] : (isset($inputData['action']) ? $inputData['action'] : '');
 
+function ccas_normalize_product_name($name) {
+    $normalized = preg_replace('/\s+/u', ' ', trim($name));
+    if ($normalized === null) {
+        $normalized = preg_replace('/\s+/', '', trim($name));
+    }
+    return function_exists('mb_strtolower')
+        ? mb_strtolower($normalized, 'UTF-8')
+        : strtolower($normalized);
+}
+
 if ($action === 'r2_status') {
     if ($method === 'GET') {
         echo json_encode(["status" => "success", "r2" => ccas_r2_read_status()]);
@@ -124,15 +134,26 @@ switch ($action) {
             // Fetch products
             $stmt = $conn->prepare("SELECT id, barcode, brand, name, ram, storage_gb AS storageGb, price, cost_price AS costPrice, stock, category, description, warranty_days AS warrantyDays, warranty_days AS warranty_days FROM products ORDER BY name ASC");
             $stmt->execute();
-            $products = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            $productRows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            $products = [];
+            $seenProductNames = [];
+            foreach ($productRows as $product) {
+                $normalizedProductName = ccas_normalize_product_name($product['name']);
+                if (isset($seenProductNames[$normalizedProductName])) {
+                    continue;
+                }
+                $seenProductNames[$normalizedProductName] = true;
+                $products[] = $product;
+            }
             echo json_encode(["status" => "success", "products" => $products]);
         } elseif ($method === 'POST') {
             // Create a new product
-            if (empty($inputData['name']) || empty($inputData['barcode']) || !isset($inputData['price'])) {
+            if (empty($inputData['name']) || !is_string($inputData['name']) || empty($inputData['barcode']) || !isset($inputData['price'])) {
                 http_response_code(400);
                 echo json_encode(["status" => "error", "message" => "Missing required product fields."]);
                 break;
             }
+            $productName = trim($inputData['name']);
             $costPrice = $inputData['costPrice'] ?? $inputData['cost_price'] ?? null;
             if ($costPrice !== null && $costPrice !== '' && (!is_numeric($costPrice) || (float)$costPrice < 0)) {
                 http_response_code(400);
@@ -146,22 +167,54 @@ switch ($action) {
                 echo json_encode(["status" => "error", "message" => "Storage/ROM is required."]);
                 break;
             }
-            $stmt = $conn->prepare("INSERT INTO products (id, barcode, brand, name, ram, storage_gb, price, cost_price, stock, category, description, warranty_days) VALUES (:id, :barcode, :brand, :name, :ram, :storage_gb, :price, :cost_price, :stock, :category, :description, :warranty_days)");
-            $stmt->execute([
-                ':id' => $id,
-                ':barcode' => $inputData['barcode'],
-                ':brand' => trim($inputData['brand'] ?? ''),
-                ':name' => $inputData['name'],
-                ':ram' => trim($inputData['ram'] ?? ''),
-                ':storage_gb' => trim($inputData['storageGb'] ?? ''),
-                ':price' => $inputData['price'],
-                ':cost_price' => $costPrice,
-                ':stock' => isset($inputData['stock']) ? intval($inputData['stock']) : 0,
-                ':category' => isset($inputData['category']) ? $inputData['category'] : 'General',
-                ':description' => isset($inputData['description']) ? $inputData['description'] : '',
-                ':warranty_days' => isset($inputData['warrantyDays']) ? intval($inputData['warrantyDays']) : null
-            ]);
-            echo json_encode(["status" => "success", "message" => "Product created successfully", "id" => $id]);
+            $normalizedProductName = ccas_normalize_product_name($productName);
+            $lockName = 'product-name-' . sha1($normalizedProductName);
+            $lockStmt = $conn->prepare("SELECT GET_LOCK(:lock_name, 5)");
+            $lockStmt->execute([':lock_name' => $lockName]);
+            if ((int)$lockStmt->fetchColumn() !== 1) {
+                http_response_code(503);
+                echo json_encode(["status" => "error", "message" => "Could not verify whether this product name is already in use. Please try again."]);
+                break;
+            }
+
+            try {
+                $duplicateStmt = $conn->query("SELECT name FROM products");
+                $duplicateFound = false;
+                foreach ($duplicateStmt->fetchAll(PDO::FETCH_COLUMN) as $existingProductName) {
+                    if (ccas_normalize_product_name($existingProductName) === $normalizedProductName) {
+                        $duplicateFound = true;
+                        break;
+                    }
+                }
+                if ($duplicateFound) {
+                    http_response_code(409);
+                    echo json_encode([
+                        "status" => "error",
+                        "message" => "Error: Duplicate product detected. '" . $productName . "' already exists."
+                    ]);
+                    break;
+                }
+
+                $stmt = $conn->prepare("INSERT INTO products (id, barcode, brand, name, ram, storage_gb, price, cost_price, stock, category, description, warranty_days) VALUES (:id, :barcode, :brand, :name, :ram, :storage_gb, :price, :cost_price, :stock, :category, :description, :warranty_days)");
+                $stmt->execute([
+                    ':id' => $id,
+                    ':barcode' => $inputData['barcode'],
+                    ':brand' => trim($inputData['brand'] ?? ''),
+                    ':name' => $productName,
+                    ':ram' => trim($inputData['ram'] ?? ''),
+                    ':storage_gb' => trim($inputData['storageGb'] ?? ''),
+                    ':price' => $inputData['price'],
+                    ':cost_price' => $costPrice,
+                    ':stock' => isset($inputData['stock']) ? intval($inputData['stock']) : 0,
+                    ':category' => isset($inputData['category']) ? $inputData['category'] : 'General',
+                    ':description' => isset($inputData['description']) ? $inputData['description'] : '',
+                    ':warranty_days' => isset($inputData['warrantyDays']) ? intval($inputData['warrantyDays']) : null
+                ]);
+                echo json_encode(["status" => "success", "message" => "Product created successfully", "id" => $id]);
+            } finally {
+                $releaseLockStmt = $conn->prepare("SELECT RELEASE_LOCK(:lock_name)");
+                $releaseLockStmt->execute([':lock_name' => $lockName]);
+            }
         }
         break;
 
@@ -173,6 +226,7 @@ switch ($action) {
                 echo json_encode(["status" => "error", "message" => "Missing required update parameters."]);
                 break;
             }
+            $productName = trim($inputData['name']);
             $costPrice = $inputData['costPrice'] ?? $inputData['cost_price'] ?? null;
             if ($costPrice !== null && $costPrice !== '' && (!is_numeric($costPrice) || (float)$costPrice < 0)) {
                 http_response_code(400);
@@ -185,22 +239,55 @@ switch ($action) {
                 echo json_encode(["status" => "error", "message" => "Storage/ROM is required."]);
                 break;
             }
-            $stmt = $conn->prepare("UPDATE products SET barcode = :barcode, brand = :brand, name = :name, ram = :ram, storage_gb = :storage_gb, price = :price, cost_price = :cost_price, stock = :stock, category = :category, description = :description, warranty_days = :warranty_days WHERE id = :id");
-            $stmt->execute([
-                ':id' => $inputData['id'],
-                ':barcode' => $inputData['barcode'],
-                ':brand' => trim($inputData['brand'] ?? ''),
-                ':name' => $inputData['name'],
-                ':ram' => trim($inputData['ram'] ?? ''),
-                ':storage_gb' => trim($inputData['storageGb'] ?? ''),
-                ':price' => $inputData['price'],
-                ':cost_price' => $costPrice,
-                ':stock' => intval($inputData['stock']),
-                ':category' => $inputData['category'],
-                ':description' => $inputData['description'],
-                ':warranty_days' => isset($inputData['warrantyDays']) ? intval($inputData['warrantyDays']) : null
-            ]);
-            echo json_encode(["status" => "success", "message" => "Product updated successfully"]);
+            $normalizedProductName = ccas_normalize_product_name($productName);
+            $lockName = 'product-name-' . sha1($normalizedProductName);
+            $lockStmt = $conn->prepare("SELECT GET_LOCK(:lock_name, 5)");
+            $lockStmt->execute([':lock_name' => $lockName]);
+            if ((int)$lockStmt->fetchColumn() !== 1) {
+                http_response_code(503);
+                echo json_encode(["status" => "error", "message" => "Could not verify whether this product name is already in use. Please try again."]);
+                break;
+            }
+
+            try {
+                $duplicateStmt = $conn->prepare("SELECT id, name FROM products WHERE id <> :id");
+                $duplicateStmt->execute([':id' => $inputData['id']]);
+                $duplicateFound = false;
+                foreach ($duplicateStmt->fetchAll(PDO::FETCH_ASSOC) as $existingProduct) {
+                    if (ccas_normalize_product_name($existingProduct['name']) === $normalizedProductName) {
+                        $duplicateFound = true;
+                        break;
+                    }
+                }
+                if ($duplicateFound) {
+                    http_response_code(409);
+                    echo json_encode([
+                        "status" => "error",
+                        "message" => "Error: Duplicate product detected. '" . $productName . "' already exists."
+                    ]);
+                    break;
+                }
+
+                $stmt = $conn->prepare("UPDATE products SET barcode = :barcode, brand = :brand, name = :name, ram = :ram, storage_gb = :storage_gb, price = :price, cost_price = :cost_price, stock = :stock, category = :category, description = :description, warranty_days = :warranty_days WHERE id = :id");
+                $stmt->execute([
+                    ':id' => $inputData['id'],
+                    ':barcode' => $inputData['barcode'],
+                    ':brand' => trim($inputData['brand'] ?? ''),
+                    ':name' => $productName,
+                    ':ram' => trim($inputData['ram'] ?? ''),
+                    ':storage_gb' => trim($inputData['storageGb'] ?? ''),
+                    ':price' => $inputData['price'],
+                    ':cost_price' => $costPrice,
+                    ':stock' => intval($inputData['stock']),
+                    ':category' => $inputData['category'],
+                    ':description' => $inputData['description'],
+                    ':warranty_days' => isset($inputData['warrantyDays']) ? intval($inputData['warrantyDays']) : null
+                ]);
+                echo json_encode(["status" => "success", "message" => "Product updated successfully"]);
+            } finally {
+                $releaseLockStmt = $conn->prepare("SELECT RELEASE_LOCK(:lock_name)");
+                $releaseLockStmt->execute([':lock_name' => $lockName]);
+            }
         }
         break;
 

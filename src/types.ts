@@ -45,10 +45,8 @@ export interface Transaction {
   cashierUsername: string;
   cashierName: string;
   items: TransactionItem[];
-  discount: number; // percentage or fixed amount
+  discount: number; // fixed amount in pesos
   subtotal: number;
-  vatableSales?: number;
-  vatAmount?: number;
   additionalCharge?: number;
   total: number;
   paymentReceived: number;

@@ -113,7 +113,7 @@ export default function CashierPOS({
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('All');
   const [cart, setCart] = useState<{ product: Product; quantity: number }[]>([]);
-  const [discountPercent, setDiscountPercent] = useState<string>('');
+  const [discountAmountInput, setDiscountAmountInput] = useState<string>('');
   const [cashReceived, setCashReceived] = useState<string>('');
   const [customerLocation, setCustomerLocation] = useState('');
   const [geocodingCustomerLocation, setGeocodingCustomerLocation] = useState(false);
@@ -238,7 +238,7 @@ export default function CashierPOS({
   // Clear Cart
   const handleClearCart = () => {
     setCart([]);
-    setDiscountPercent('');
+    setDiscountAmountInput('');
     setCashReceived('');
     setBarcodeFeedback({ text: 'Active sales cart cleared.', type: 'info' });
   };
@@ -267,11 +267,9 @@ export default function CashierPOS({
   // Financial Calculations
   const calculations = useMemo(() => {
     const subtotal = cart.reduce((sum, item) => sum + (item.product.price * item.quantity), 0);
-    const parsedDiscountPercent = parseFloat(discountPercent) || 0;
-    const discountAmount = subtotal * (parsedDiscountPercent / 100);
+    const parsedDiscountAmount = parseFloat(discountAmountInput) || 0;
+    const discountAmount = Math.min(subtotal, Math.max(0, parsedDiscountAmount));
     const total = Math.max(0, subtotal - discountAmount);
-    const vatableSales = total / 1.12;
-    const vatAmount = total - vatableSales;
     
     const parsedReceived = parseFloat(cashReceived) || 0;
     const change = Math.max(0, parsedReceived - total);
@@ -279,15 +277,12 @@ export default function CashierPOS({
 
     return {
       subtotal,
-      discountPercent: parsedDiscountPercent,
       discountAmount,
       total,
-      vatableSales,
-      vatAmount,
       change,
       isPaymentSufficient
     };
-  }, [cart, discountPercent, cashReceived]);
+  }, [cart, discountAmountInput, cashReceived]);
 
   // Complete Sale and Create Receipt Invoice
   const handleCheckoutSubmit = async (e: React.FormEvent) => {
@@ -298,7 +293,7 @@ export default function CashierPOS({
       return;
     }
 
-    const { total, subtotal, change, vatableSales, vatAmount } = calculations;
+    const { total, subtotal, change } = calculations;
     const parsedReceived = parseFloat(cashReceived) || 0;
 
     if (parsedReceived < total) {
@@ -356,10 +351,8 @@ export default function CashierPOS({
       cashierUsername: currentAuth.username,
       cashierName: currentAuth.fullName,
       items: finalItems,
-      discount: calculations.discountPercent,
+      discount: calculations.discountAmount,
       subtotal: parseFloat(subtotal.toFixed(2)),
-      vatableSales: parseFloat(vatableSales.toFixed(2)),
-      vatAmount: parseFloat(vatAmount.toFixed(2)),
       total: parseFloat(total.toFixed(2)),
       paymentReceived: parseFloat(parsedReceived.toFixed(2)),
       changeAmount: parseFloat(change.toFixed(2)),
@@ -377,7 +370,7 @@ export default function CashierPOS({
     
     // Clear sales registers
     setCart([]);
-    setDiscountPercent('');
+    setDiscountAmountInput('');
     setCashReceived('');
     setCustomerLocation('');
     setBarcodeFeedback({ text: `Succesfully saved transaction ${invoiceId}`, type: 'success' });
@@ -863,33 +856,33 @@ export default function CashierPOS({
             {/* Custom discount input */}
             <div className="pb-2 border-b border-dashed border-slate-200">
               <label htmlFor="pos-discount-input" className="text-xs uppercase font-bold text-slate-700 flex items-center gap-1 font-mono">
-                <Tag className="w-3 h-3 text-slate-500" /> DISCOUNT RATE (%)
+                <Tag className="w-3 h-3 text-slate-500" /> DISCOUNT AMOUNT (₱)
               </label>
               <div className="relative mt-1.5 max-w-xs">
                 <input
                   id="pos-discount-input"
                   type="number"
                   min="0"
-                  max="100"
+                  max={calculations.subtotal}
                   step="0.01"
-                  value={discountPercent}
+                  value={discountAmountInput}
                   onChange={(e) => {
                     const value = e.target.value;
                     if (value === '') {
-                      setDiscountPercent('');
+                      setDiscountAmountInput('');
                       return;
                     }
                     const parsedValue = Number(value);
                     if (Number.isFinite(parsedValue)) {
-                      setDiscountPercent(String(Math.min(100, Math.max(0, parsedValue))));
+                      setDiscountAmountInput(String(Math.min(calculations.subtotal, Math.max(0, parsedValue))));
                     }
                   }}
                   aria-describedby="pos-discount-help"
-                  className="w-full pr-10 py-2 bg-white border border-slate-205 rounded-lg font-mono font-bold text-base text-slate-900 focus:outline-none focus:ring-1 focus:ring-slate-900"
+                  className="w-full pl-8 pr-3 py-2 bg-white border border-slate-205 rounded-lg font-mono font-bold text-base text-slate-900 focus:outline-none focus:ring-1 focus:ring-slate-900"
                 />
-                <span className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-500 font-bold">%</span>
+                <span className="absolute inset-y-0 left-0 pl-3 flex items-center text-slate-500 font-bold">₱</span>
               </div>
-              <p id="pos-discount-help" className="mt-1 text-[11px] text-slate-500">Enter any discount from 0% to 100%.</p>
+              <p id="pos-discount-help" className="mt-1 text-[11px] text-slate-500">Enter a peso amount up to the subtotal.</p>
             </div>
 
             {/* Calculations summaries */}
@@ -899,23 +892,12 @@ export default function CashierPOS({
                 <span className="font-bold">₱{calculations.subtotal.toFixed(2)}</span>
               </div>
               
-              {calculations.discountPercent > 0 && (
+              {calculations.discountAmount > 0 && (
                 <div className="flex justify-between text-rose-700 font-medium font-bold">
-                  <span>DISCOUNT DEDUCTION ({calculations.discountPercent}%):</span>
+                  <span>DISCOUNT DEDUCTION:</span>
                   <span>-₱{calculations.discountAmount.toFixed(2)}</span>
                 </div>
               )}
-
-              <div className="border-t border-dashed border-slate-200 pt-2 space-y-1 text-slate-600 text-xs">
-                <div className="flex justify-between">
-                  <span>VATABLE SALES (VAT-INCLUSIVE):</span>
-                  <span className="font-bold">₱{calculations.vatableSales.toFixed(2)}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span>VAT AMOUNT (12%):</span>
-                  <span className="font-bold">₱{calculations.vatAmount.toFixed(2)}</span>
-                </div>
-              </div>
 
               <div className="flex justify-between text-xl font-black text-slate-950 pt-3 border-t border-slate-200 font-display">
                 <span>GRAND TOTAL:</span>
@@ -1066,26 +1048,10 @@ export default function CashierPOS({
                 </div>
                 {activeTransaction.discount > 0 && (
                   <div className="flex justify-between text-rose-705 font-bold">
-                    <span>DISCOUNT ({activeTransaction.discount}%):</span>
-                    <span>-₱{(activeTransaction.subtotal * activeTransaction.discount / 100).toFixed(2)}</span>
+                    <span>DISCOUNT:</span>
+                    <span>-₱{activeTransaction.discount.toFixed(2)}</span>
                   </div>
                 )}
-                {(() => {
-                  const receiptVatableSales = activeTransaction.vatableSales ?? activeTransaction.total / 1.12;
-                  const receiptVatAmount = activeTransaction.vatAmount ?? activeTransaction.total - receiptVatableSales;
-                  return (
-                    <div className="border-t border-dashed border-slate-250 pt-2 mt-2 space-y-1 text-slate-600">
-                      <div className="flex justify-between">
-                        <span>VATABLE SALES:</span>
-                        <span>₱{receiptVatableSales.toFixed(2)}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span>VAT (12%):</span>
-                        <span>₱{receiptVatAmount.toFixed(2)}</span>
-                      </div>
-                    </div>
-                  );
-                })()}
                 {activeTransaction.additionalCharge && activeTransaction.additionalCharge > 0 && (
                   <div className="flex justify-between text-slate-650 font-bold">
                     <span>ADDITIONAL CHARGE:</span>

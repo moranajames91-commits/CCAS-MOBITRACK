@@ -47,7 +47,7 @@ CREATE TABLE `transactions` (
   `id` varchar(50) NOT NULL,
   `cashier_username` varchar(50) DEFAULT NULL,
   `cashier_name` varchar(100) NOT NULL,
-  `discount_percentage` decimal(5,2) NOT NULL DEFAULT 0.00,
+  `discount_percentage` decimal(12,2) NOT NULL DEFAULT 0.00,
   `subtotal` decimal(12,2) NOT NULL,
   `total` decimal(12,2) NOT NULL,
   `payment_received` decimal(12,2) NOT NULL,

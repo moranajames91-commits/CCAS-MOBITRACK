@@ -382,14 +382,14 @@ function ccas_connect_with_recovery(string $host, string $database, string $user
     return $connection;
 }
 
-function ccas_register_write_backup(PDO $connection, string $host, string $database, string $username, string $password, string $action, string $method): void
+function ccas_connect_and_validate(string $host, string $database, string $username, string $password): PDO
 {
-    $writeActions = [
-        'products', 'product_update', 'product_delete', 'add_admin', 'delete_admin',
-        'add_cashier', 'delete_cashier', 'reset_cashier_password', 'checkout',
-        'transaction_delete', 'repair_tickets', 'repair_ticket_add', 'repair_ticket_update', 'repair_ticket_delete',
-        'create', 'update', 'delete', 'toggle_status'
-    ];
+    return ccas_connect_with_recovery($host, $database, $username, $password);
+}
+
+function ccas_register_write_backup(PDO $connection, string $action, string $method): void
+{
+    $writeActions = ['checkout', 'transaction_delete'];
 
     if (!in_array($action, $writeActions, true) || !in_array($method, ['POST', 'PUT', 'DELETE'], true)) {
         return;

@@ -110,6 +110,21 @@ const getWarrantyRemainingDays = (purchaseDate: string, warrantyDays: number, to
   return warrantyDays - elapsedDays;
 };
 
+const normalizeProductName = (name: string) =>
+  name.normalize('NFKC').trim().replace(/\s+/gu, ' ').toLocaleLowerCase();
+
+const getDuplicateProductError = (name: string, products: Product[], currentProductId?: string) => {
+  const normalizedName = normalizeProductName(name);
+  const duplicate = products.find(product =>
+    product.id !== currentProductId
+    && normalizeProductName(product.name) === normalizedName
+  );
+
+  return duplicate
+    ? `Error: Duplicate product detected. '${name.trim()}' already exists.`
+    : null;
+};
+
 interface R2BackupStatus {
   configured: boolean;
   folder: string | null;
@@ -139,7 +154,7 @@ interface AdminDashboardProps {
   repairTickets: RepairTicket[];
   currentAuth: AuthState;
   onLogout: () => void;
-  onAddProduct: (prod: Product) => void;
+  onAddProduct: (prod: Product) => Promise<void>;
   onUpdateProduct: (prod: Product) => void;
   onDeleteProduct: (id: string) => void;
   onResetCashierPassword: (username: string, newPass: string) => void;
@@ -368,10 +383,12 @@ export default function AdminDashboard({
   const [modalMode, setModalMode] = useState<'add' | 'edit'>('add');
   const [editingProductId, setEditingProductId] = useState<string | null>(null);
   const [editingRepairTicketId, setEditingRepairTicketId] = useState<string | null>(null);
+  const [productSaveInProgress, setProductSaveInProgress] = useState(false);
 
   // Product form bindings
   const [pBarcode, setPBarcode] = useState('');
   const [pName, setPName] = useState('');
+  const [duplicateProductDetectedFor, setDuplicateProductDetectedFor] = useState<string | null>(null);
   const [pRam, setPRam] = useState('');
   const [pStorageGb, setPStorageGb] = useState('');
   const [pPrice, setPPrice] = useState('');
@@ -681,9 +698,19 @@ export default function AdminDashboard({
     };
   }, [transactions, products, repairTickets, chartTimePeriod]);
 
+  const inventoryProducts = useMemo(() => {
+    const seenNames = new Set<string>();
+    return products.filter(product => {
+      const normalizedName = normalizeProductName(product.name);
+      if (seenNames.has(normalizedName)) return false;
+      seenNames.add(normalizedName);
+      return true;
+    });
+  }, [products]);
+
   // Product search parsing
   const filteredProducts = useMemo(() => {
-    return products.filter(p => {
+    return inventoryProducts.filter(p => {
       const matchesSearch = 
         p.name.toLowerCase().includes(productSearch.toLowerCase()) || 
         p.barcode.toLowerCase().includes(productSearch.toLowerCase()) ||
@@ -695,7 +722,7 @@ export default function AdminDashboard({
 
       return matchesSearch && matchesStockWarn;
     });
-  }, [products, productSearch, filterStockWarnOnly]);
+  }, [inventoryProducts, productSearch, filterStockWarnOnly]);
 
   useEffect(() => {
     setVisibleProductCount(10);
@@ -1142,6 +1169,8 @@ export default function AdminDashboard({
   const handleOpenAddProduct = () => {
     setModalMode('add');
     setEditingProductId(null);
+    setDuplicateProductDetectedFor(null);
+    setProductSaveInProgress(false);
     setPBarcode(Math.floor(100000000000 + Math.random() * 900000000000).toString()); // auto generated barcode
     setPName('');
     setPRam('');
@@ -1256,6 +1285,8 @@ export default function AdminDashboard({
   const handleOpenEditProduct = (prod: Product) => {
     setModalMode('edit');
     setEditingProductId(prod.id);
+    setDuplicateProductDetectedFor(null);
+    setProductSaveInProgress(false);
     setPBarcode(prod.barcode);
     setPName(prod.name);
     setPRam(prod.ram || '');
@@ -1271,9 +1302,28 @@ export default function AdminDashboard({
     setShowProductModal(true);
   };
 
+  const hasDuplicateProduct = (!useApi && Boolean(getDuplicateProductError(
+    pName,
+    products,
+    modalMode === 'edit' ? editingProductId ?? undefined : undefined
+  ))) || (duplicateProductDetectedFor !== null
+    && normalizeProductName(duplicateProductDetectedFor) === normalizeProductName(pName));
+
   // Save product edit/add
-  const handleSaveProduct = (e: React.FormEvent) => {
+  const handleSaveProduct = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    if (!useApi) {
+      const duplicateProductError = getDuplicateProductError(
+        pName,
+        products,
+        modalMode === 'edit' ? editingProductId ?? undefined : undefined
+      );
+      if (duplicateProductError) {
+        setDuplicateProductDetectedFor(pName);
+        return;
+      }
+    }
 
     const categoryValue = (isAddingCustomCategory ? customCategory : pCategory).trim();
     const requiresStorage = categoryValue.toLowerCase() !== 'accessories';
@@ -1310,19 +1360,31 @@ export default function AdminDashboard({
 
     if (modalMode === 'add') {
       const newId = `prod-${Date.now()}`;
-      onAddProduct({
-        id: newId,
-        barcode: pBarcode.trim(),
-        name: pName.trim(),
-        ram: pRam || undefined,
-        storageGb: pStorageGb,
-        price: priceNum,
-        costPrice: costPriceNum,
-        stock: stockNum,
-        category: categoryValue,
-        description: pDescription.trim(),
-        warrantyDays: pWarrantyDays ? parseInt(pWarrantyDays, 10) : undefined
-      });
+      setProductSaveInProgress(true);
+      try {
+        await onAddProduct({
+          id: newId,
+          barcode: pBarcode.trim(),
+          name: pName.trim(),
+          ram: pRam || undefined,
+          storageGb: pStorageGb,
+          price: priceNum,
+          costPrice: costPriceNum,
+          stock: stockNum,
+          category: categoryValue,
+          description: pDescription.trim(),
+          warrantyDays: pWarrantyDays ? parseInt(pWarrantyDays, 10) : undefined
+        });
+      } catch (error) {
+        if (error instanceof Error && error.message.toLowerCase().includes('duplicate product detected')) {
+          setDuplicateProductDetectedFor(pName);
+          return;
+        }
+        alert(error instanceof Error ? error.message : 'Product could not be saved.');
+        return;
+      } finally {
+        setProductSaveInProgress(false);
+      }
     } else if (modalMode === 'edit' && editingProductId) {
       onUpdateProduct({
         id: editingProductId,
@@ -1577,7 +1639,7 @@ CREATE TABLE IF NOT EXISTS \`transactions\` (
   \`id\` varchar(50) NOT NULL PRIMARY KEY,
   \`cashier_username\` varchar(50) NOT NULL,
   \`cashier_name\` varchar(100) NOT NULL,
-  \`discount_percentage\` decimal(5,2) NOT NULL DEFAULT 0.00,
+  \`discount_percentage\` decimal(12,2) NOT NULL DEFAULT 0.00,
   \`subtotal\` decimal(12,2) NOT NULL,
   \`total\` decimal(12,2) NOT NULL,
   \`payment_received\` decimal(12,2) NOT NULL,
@@ -3022,7 +3084,7 @@ switch ($action) {
                         </p>
                       </td>
                       <td className="py-3.5 px-5 text-right text-rose-650 font-bold font-mono">
-                        {tx.discount > 0 ? `-${tx.discount}%` : '0%'}
+                        {tx.discount > 0 ? `-₱${tx.discount.toFixed(2)}` : '₱0.00'}
                       </td>
                       <td className="py-3.5 px-5 text-right font-black text-slate-950 font-mono text-xs whitespace-nowrap">
                         ₱{tx.total.toFixed(2)}
@@ -4175,7 +4237,10 @@ CIMS_R2_SECRET_ACCESS_KEY=your R2 Secret Access Key
                     placeholder="e.g. Wireless Bluetooth Headset"
                     value={pName}
                     id="modal-product-name"
-                    onChange={(e) => setPName(e.target.value)}
+                    onChange={(e) => {
+                      setPName(e.target.value);
+                      setDuplicateProductDetectedFor(null);
+                    }}
                     className="w-full py-2 px-3 border border-slate-205 rounded focus:outline-none focus:ring-1 focus:ring-slate-500 text-xs font-sans placeholder:opacity-50"
                   />
                 </div>
@@ -4388,13 +4453,25 @@ CIMS_R2_SECRET_ACCESS_KEY=your R2 Secret Access Key
                 >
                   Cancel
                 </button>
-                <button
-                  type="submit"
-                  id="modal-product-submit"
-                  className="flex-1 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded text-center transition border border-slate-950"
-                >
-                  {modalMode === 'add' ? 'Confirm Entry' : 'Apply Changes'}
-                </button>
+                {hasDuplicateProduct ? (
+                  <button
+                    type="button"
+                    disabled
+                    aria-live="assertive"
+                    className="flex-1 py-2 bg-rose-100 text-rose-800 font-bold rounded text-center border border-rose-300 cursor-not-allowed"
+                  >
+                    This product already exist.
+                  </button>
+                ) : (
+                  <button
+                    type="submit"
+                    id="modal-product-submit"
+                    disabled={productSaveInProgress}
+                    className="flex-1 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded text-center transition border border-slate-950 disabled:opacity-60 disabled:cursor-wait"
+                  >
+                    {productSaveInProgress ? 'Saving...' : modalMode === 'add' ? 'Confirm Entry' : 'Apply Changes'}
+                  </button>
+                )}
               </div>
 
             </form>
